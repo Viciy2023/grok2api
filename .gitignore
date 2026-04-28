@@ -37,6 +37,7 @@ env/
 
 # Environment Variables
 .env
+huggingface/.env
 
 # Logs
 logs/

@@ -1,0 +1,46 @@
+name: Deploy Hugging Face Space
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Space payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf hf-space
+          mkdir -p hf-space
+          cp huggingface/Dockerfile hf-space/Dockerfile
+          cp huggingface/start.sh hf-space/start.sh
+          cp huggingface/README.md hf-space/README.md
+          cp huggingface/.env.example hf-space/.env.example
+
+      - name: Publish to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd hf-space
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Deploy from GitHub Actions ${GITHUB_SHA}" || true
+          git branch -M main
+          git remote add origin "https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}"
+          git push --force origin main
