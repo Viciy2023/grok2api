@@ -9,7 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SERVER_PORT=7860 \
     SERVER_WORKERS=1 \
     DATA_DIR=/data \
-    LOG_DIR=/data/logs
+    LOG_DIR=/data/logs \
+    ACCOUNT_STORAGE=local
 
 WORKDIR /app
 
@@ -25,15 +26,22 @@ RUN apt-get update \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.6.17 /uv /uvx /bin/
+# Pin uv minor line for reproducible builds (aligned with upstream).
+COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
 
-RUN git clone --depth 1 https://github.com/chenyme/grok2api.git /tmp/src \
+# Always build from the official upstream source, not the local fork tree.
+ARG GROK2API_REPO=https://github.com/chenyme/grok2api.git
+ARG GROK2API_REF=main
+
+RUN git clone --depth 1 --branch "${GROK2API_REF}" "${GROK2API_REPO}" /tmp/src \
     && cp /tmp/src/pyproject.toml /app/pyproject.toml \
     && cp /tmp/src/uv.lock /app/uv.lock \
     && uv sync --frozen --no-dev --no-install-project \
     && cp -r /tmp/src/app /app/app \
+    && cp -r /tmp/src/scripts /app/scripts \
     && cp /tmp/src/config.defaults.toml /app/config.defaults.toml \
-    && rm -rf /tmp/src
+    && chmod +x /app/scripts/*.sh \
+    && rm -rf /tmp/src /root/.cache /tmp/uv-cache
 
 COPY start.sh /app/start.sh
 
@@ -41,4 +49,4 @@ RUN chmod +x /app/start.sh \
     && mkdir -p /data /data/logs
 
 ENTRYPOINT ["/app/start.sh"]
-CMD ["granian", "--interface", "asgi", "--host", "0.0.0.0", "--port", "7860", "--workers", "1", "app.main:app"]
+CMD ["sh", "-c", "exec granian --interface asgi --host ${SERVER_HOST} --port ${SERVER_PORT} --workers ${SERVER_WORKERS} app.main:app"]
