@@ -10,53 +10,50 @@ pinned: false
 
 # Grok2Api on Hugging Face Spaces
 
-This Space runs the official [chenyme/grok2api](https://github.com/chenyme/grok2api) FastAPI gateway in Docker mode.
+Runs the official [chenyme/grok2api](https://github.com/chenyme/grok2api) **Go + React** gateway.
 
-## How it builds
+## Build model
 
-- Space repository only contains the HF adapter (`Dockerfile`, `start.sh`, this README, `.env.example`)
-- During image build, the Dockerfile **clones the official upstream** `https://github.com/chenyme/grok2api` and installs from that source
-- Local fork application code is **not** copied into the image
+- This Space repository only contains the HF adapter (`Dockerfile`, `start.sh`, this README, `.env.example`)
+- Docker build **clones upstream** `https://github.com/chenyme/grok2api` (`main`) and builds frontend + backend from that source
+- Local Python-era fork code is **not** used
 
 ## Persistent storage
 
-Mount HF Storage (example: `DanielleNguyen/Grok2Api-storage`) to **`/data`**.
+Mount HF Storage (e.g. `DanielleNguyen/Grok2Api-storage`) to **`/data`**.
 
 | Path | Purpose |
 | --- | --- |
-| `/data` | `DATA_DIR` root (accounts DB, media cache, config) |
-| `/data/.env` | Optional runtime environment file (loaded on start) |
-| `/data/config.toml` | Runtime config (seeded from `config.defaults.toml` on first boot) |
-| `/data/logs` | Log directory |
+| `/data/config.yaml` | Runtime config (seeded from upstream `config.example.yaml` on first boot) |
+| `/data/backend.db` | SQLite database |
+| `/data/media` | Local media files |
+| `/data/.env` | Optional env file loaded at start |
 
-## Required runtime settings
+## First boot secrets
 
-Set either in `/data/.env` or Space Variables/Secrets:
+Edit `/data/config.yaml` (or set env vars **before** first seed):
 
-| Variable | Notes |
+| Field / env | Notes |
 | --- | --- |
-| `DATA_DIR` | Must be `/data` when using the storage mount |
-| `LOG_DIR` | Prefer `/data/logs` |
-| `SERVER_PORT` | Must stay `7860` for Spaces |
-| `ACCOUNT_STORAGE` | Prefer `local` with `/data` |
-| `GROK_APP_APP_KEY` | Admin password (override default) |
-| `GROK_APP_API_KEY` | API key for `/v1/*` |
-| `GROK_APP_APP_URL` | Public Space URL, e.g. `https://daniellenguyen-grok2api.hf.space` |
+| `secrets.jwtSecret` / `GROK2API_JWT_SECRET` | `openssl rand -hex 32` |
+| `secrets.credentialEncryptionKey` / `GROK2API_CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 32` (keep forever) |
+| `bootstrapAdmin.password` / `GROK2API_ADMIN_PASSWORD` | Strong admin password |
+| `auth.secureCookies` / `GROK2API_SECURE_COOKIES` | Prefer `true` on HTTPS Space |
 
-`SPACE_HOST` / `SPACE_ID` are optional fallbacks used by `start.sh` to write `app.app_url` when `GROK_APP_APP_URL` is empty.
+Service refuses insecure defaults if secrets are not replaced.
 
 ## Service
 
-- Port: `7860`
-- Entrypoint: `start.sh` → `granian` ASGI on `app.main:app`
-- Admin: `/admin/login`
-- Health: `/health`
+- Port: `7860` (Spaces requirement)
+- Health: `/healthz`
+- Admin UI: `/` (same origin as API)
+- API: `/v1/*` with `Authorization: Bearer g2a_...`
 
 ## Deploy from GitHub
 
-GitHub Actions workflow `.github/workflows/deploy-hf.yml` syncs only the `huggingface/` adapter files to this Space on `main` push or manual dispatch.
+Workflow `.github/workflows/deploy-hf.yml` syncs only `huggingface/*` to this Space.
 
-Required GitHub secrets:
+GitHub secrets:
 
-- `HF_TOKEN` — write access to the Space
-- `HF_SPACE_ID` — e.g. `DanielleNguyen/Grok2Api`
+- `HF_TOKEN`
+- `HF_SPACE_ID` (e.g. `DanielleNguyen/Grok2Api`)
