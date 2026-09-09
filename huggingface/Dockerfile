@@ -58,6 +58,7 @@ WORKDIR /app
 
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
+COPY --from=src /src/VERSION /app/VERSION
 COPY --from=src /src/config.example.yaml /app/config.example.yaml
 COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
 

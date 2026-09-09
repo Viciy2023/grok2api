@@ -8,9 +8,9 @@ app_port: 7860
 pinned: false
 ---
 
-# Grok2Api on Hugging Face Spaces
+# Grok2Api v3.1.5 on Hugging Face Spaces
 
-Runs the official [chenyme/grok2api](https://github.com/chenyme/grok2api) **Go + React** gateway.
+Runs the official [chenyme/grok2api](https://github.com/chenyme/grok2api) (Go + React) gateway.
 
 ## Build model
 
