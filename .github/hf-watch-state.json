@@ -1,7 +1,12 @@
 {
   "heartbeat_at": "2026-09-22T00:00:00Z",
-  "last_checked_at": null,
-  "last_result": "unknown",
+  "last_checked_at": "2026-09-22T15:50:15Z",
+  "last_result": "deployed",
   "last_reason": "watchdog bootstrapped; awaiting the first drift check",
-  "consecutive_failures": 0
+  "consecutive_failures": 0,
+  "last_deploy_at": "2026-09-22T15:50:15Z",
+  "deployed_upstream_ref": "5e5ad75556b61a2c4a8fcf344d83bfe7760f2b42",
+  "deployed_upstream_version": "v3.1.6",
+  "deployed_image_digest": "sha256:adb62afc79a0c31844d3af8d9e73b0eb034dedddca60f3f6d95b605c734d7a4f",
+  "deployed_build_mode": "image"
 }
