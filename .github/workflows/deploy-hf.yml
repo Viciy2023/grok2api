@@ -1,53 +1,142 @@
 name: Deploy Hugging Face Space
 
+# Single publishing primitive for the Space.
+#
+#   * workflow_call     - invoked by hf-upstream-watch.yml whenever the Space
+#                         drifts from the newest upstream image or from the
+#                         adapter in this repository
+#   * workflow_dispatch - manual deploy / re-deploy / rollback
+#
+# There is deliberately no `push` trigger: adapter edits are detected by the
+# watchdog (it fingerprints huggingface/), so a deploy that failed still heals
+# on the next run instead of being forgotten.
+#
+# The Space repository itself is never hand-edited — it is a build artifact of
+# (upstream revision, adapter payload). See .github/scripts/hf-publish.sh.
+
 on:
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - "huggingface/**"
-      - ".github/workflows/deploy-hf.yml"
   workflow_dispatch:
+    inputs:
+      build_mode:
+        description: "Build strategy"
+        type: choice
+        options: [image, source]
+        default: image
+      upstream_ref:
+        description: "Upstream ref to pin (commit SHA, tag or branch). Empty = adapter default."
+        type: string
+        default: ""
+      image_digest:
+        description: "Immutable GHCR manifest digest (sha256:...) to pin the base image"
+        type: string
+        default: ""
+      image_tag:
+        description: "GHCR tag used when no digest is given"
+        type: string
+        default: "main"
+      upstream_version:
+        description: "Informational upstream version, e.g. v3.1.6"
+        type: string
+        default: ""
+      force:
+        description: "Deploy even when the Space already matches"
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      build_mode:
+        description: "image | source"
+        type: string
+        required: false
+        default: "image"
+      upstream_ref:
+        description: "Upstream ref to pin"
+        type: string
+        required: false
+        default: "main"
+      image_digest:
+        description: "Immutable GHCR manifest digest"
+        type: string
+        required: false
+        default: ""
+      image_tag:
+        description: "GHCR tag fallback"
+        type: string
+        required: false
+        default: "main"
+      upstream_version:
+        description: "Informational upstream version"
+        type: string
+        required: false
+        default: ""
+      force:
+        description: "Deploy even when the Space already matches"
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      HF_TOKEN:
+        required: true
+      HF_SPACE_ID:
+        required: false
+
+concurrency:
+  # Serialises deployments. Deliberately different from the watchdog's own
+  # group so a called workflow can never deadlock behind its caller.
+  group: hf-space-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
-
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE_ID: ${{ secrets.HF_SPACE_ID != '' && secrets.HF_SPACE_ID || vars.HF_SPACE_ID }}
+      HF_BUILD_MODE: ${{ inputs.build_mode }}
+      HF_UPSTREAM_REF: ${{ inputs.upstream_ref != '' && inputs.upstream_ref || 'main' }}
+      HF_IMAGE_DIGEST: ${{ inputs.image_digest }}
+      HF_IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || 'main' }}
+      HF_UPSTREAM_VERSION: ${{ inputs.upstream_version }}
+      HF_FORCE: ${{ inputs.force }}
+      HF_SOURCE_SHA: ${{ github.sha }}
     steps:
-      - name: Checkout repository
+      - name: Checkout adapter
         uses: actions/checkout@v4
 
-      - name: Prepare Space payload
-        shell: bash
+      - name: Validate configuration
         run: |
           set -euo pipefail
-          rm -rf hf-space
-          mkdir -p hf-space
-          cp huggingface/Dockerfile hf-space/Dockerfile
-          cp huggingface/start.sh hf-space/start.sh
-          cp huggingface/README.md hf-space/README.md
-          cp huggingface/.env.example hf-space/.env.example
+          test -n "${HF_TOKEN:-}"     || { echo "::error::missing secret HF_TOKEN"; exit 1; }
+          test -n "${HF_SPACE_ID:-}"  || { echo "::error::missing secret/variable HF_SPACE_ID"; exit 1; }
+          echo "Space          : ${HF_SPACE_ID}"
+          echo "build mode     : ${HF_BUILD_MODE}"
+          echo "upstream ref   : ${HF_UPSTREAM_REF}"
+          echo "image digest   : ${HF_IMAGE_DIGEST:-<tag ${HF_IMAGE_TAG}>}"
+          echo "adapter commit : ${HF_SOURCE_SHA}"
 
-      - name: Publish to Hugging Face Space
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
-        shell: bash
+      - name: Publish and verify Space
+        id: publish
+        run: bash .github/scripts/hf-publish.sh deploy
+
+      - name: Roll back to the previous deployment
+        if: failure() && steps.publish.outcome == 'failure'
+        run: bash .github/scripts/hf-publish.sh rollback
+
+      - name: Summary
+        if: always()
         run: |
-          set -euo pipefail
-          if [ -z "${HF_TOKEN:-}" ] || [ -z "${HF_SPACE_ID:-}" ]; then
-            echo "HF_TOKEN and HF_SPACE_ID secrets are required" >&2
-            exit 1
-          fi
-          cd hf-space
-          git init
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "Deploy HF adapter from ${GITHUB_SHA}"
-          git branch -M main
-          git remote add origin "https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}"
-          git push --force origin main
+          {
+            echo "### Hugging Face Space deployment"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| Space | \`${HF_SPACE_ID:-<unset>}\` |"
+            echo "| build mode | \`${HF_BUILD_MODE}\` |"
+            echo "| upstream ref | \`${HF_UPSTREAM_REF}\` |"
+            echo "| image | \`${HF_IMAGE_DIGEST:-${HF_IMAGE_TAG}}\` |"
+            echo "| publish step | \`${{ steps.publish.outcome }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,7 @@
+{
+  "heartbeat_at": "2026-09-22T00:00:00Z",
+  "last_checked_at": null,
+  "last_result": "unknown",
+  "last_reason": "watchdog bootstrapped; awaiting the first drift check",
+  "consecutive_failures": 0
+}

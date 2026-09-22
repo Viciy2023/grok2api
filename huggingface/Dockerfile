@@ -1,5 +1,12 @@
-# Hugging Face Space adapter for official chenyme/grok2api (Go + React rewrite).
-# Build always clones upstream; this Space repo only ships the adapter layer.
+# Hugging Face Space adapter for official chenyme/grok2api (source mode).
+#
+# This is the FALLBACK build strategy. The default is ./Dockerfile.image, which
+# re-bases the image upstream already publishes to GHCR and is far faster and
+# more robust. Keep this file for the case where upstream stops publishing
+# images, or when a local patch of upstream source is required.
+#
+# The auto-update workflow pins GROK2API_REF to an immutable upstream commit
+# SHA, so every deployment is reproducible.
 
 ARG NODE_VERSION=22
 ARG GO_VERSION=1.26
@@ -7,11 +14,18 @@ ARG ALPINE_VERSION=3.23
 ARG GROK2API_REPO=https://github.com/chenyme/grok2api.git
 ARG GROK2API_REF=main
 
+# Fetch upstream at an exact commit. `git clone --branch` accepts only branches
+# and tags, so fetch explicitly: this accepts a branch, a tag OR a full commit
+# SHA, which is what makes SHA-pinned deploys possible.
 FROM alpine:${ALPINE_VERSION} AS src
 ARG GROK2API_REPO
 ARG GROK2API_REF
 RUN apk add --no-cache git ca-certificates \
-    && git clone --depth 1 --branch "${GROK2API_REF}" "${GROK2API_REPO}" /src \
+    && git init -q /src \
+    && cd /src \
+    && git remote add origin "${GROK2API_REPO}" \
+    && git fetch -q --depth 1 origin "${GROK2API_REF}" \
+    && git checkout -q FETCH_HEAD \
     && test -f /src/backend/go.mod \
     && test -f /src/frontend/package.json \
     && test -f /src/config.example.yaml \
@@ -24,9 +38,10 @@ COPY --from=src /src/frontend/package.json /src/frontend/pnpm-lock.yaml ./
 RUN pnpm config set store-dir /pnpm/store \
     && pnpm fetch --frozen-lockfile \
     && pnpm install --offline --frozen-lockfile
-COPY --from=src /src/frontend/index.html /src/frontend/vite.config.ts /src/frontend/tsconfig.json /src/frontend/tsconfig.app.json /src/frontend/tsconfig.node.json ./
-COPY --from=src /src/frontend/public ./public
-COPY --from=src /src/frontend/src ./src
+# Copy the whole frontend tree instead of an explicit file list: upstream keeps
+# adding root-level build inputs (components.json, tsconfig.test.json, ...) and
+# an enumerated list silently breaks the build when it does.
+COPY --from=src /src/frontend/ ./
 RUN pnpm build
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS backend-builder
@@ -36,17 +51,19 @@ WORKDIR /src/backend
 RUN apk add --no-cache ca-certificates git
 COPY --from=src /src/backend/go.mod /src/backend/go.sum ./
 RUN go mod download
-COPY --from=src /src/backend/cmd ./cmd
-COPY --from=src /src/backend/internal ./internal
-COPY --from=src /src/backend/docs/docs.go ./docs/docs.go
+# Same reasoning as the frontend: copy the whole module.
+COPY --from=src /src/backend/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/grok2api ./cmd/grok2api
 
 FROM alpine:${ALPINE_VERSION}
 
+ARG GROK2API_REF
+
 ENV TZ=Asia/Shanghai \
-    GROK2API_CONFIG_SOURCE=/data/config.yaml \
-    SERVER_PORT=7860
+    SERVER_PORT=7860 \
+    DATA_DIR=/data \
+    GROK2API_CONFIG_SOURCE=/data/config.yaml
 
 RUN apk add --no-cache ca-certificates su-exec tzdata wget \
     && addgroup -S -g 10001 grok2api \
@@ -62,9 +79,13 @@ COPY --from=src /src/VERSION /app/VERSION
 COPY --from=src /src/config.example.yaml /app/config.example.yaml
 COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
 
+LABEL org.opencontainers.image.source="https://github.com/chenyme/grok2api" \
+      io.viciy.adapter="huggingface/Dockerfile" \
+      io.viciy.upstream.ref="${GROK2API_REF}"
+
 EXPOSE 7860
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD wget -qO- "http://127.0.0.1:${SERVER_PORT}/healthz" >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/hf-start.sh"]

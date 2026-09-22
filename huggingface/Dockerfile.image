@@ -1,0 +1,67 @@
+# Hugging Face Space adapter for official chenyme/grok2api (thin image mode).
+#
+# WHY THIS EXISTS
+# Upstream publishes a multi-arch image to GHCR on every push to main
+# (chenyme/grok2api/.github/workflows/ghcr-image.yml). That image is already
+# compiled, tested (go test / go vet / pnpm lint) and labelled with the exact
+# upstream revision. This adapter re-bases that artifact and adds the Hugging
+# Face runtime contract (port 7860, /data persistent storage, config seeding).
+#
+# Building the Space therefore takes seconds and cannot break because upstream
+# changed a build script, bumped Go/Node, or added a file the compiler needs.
+# That reliability is what makes unattended auto-updates safe.
+#
+# PINNING
+# The auto-update workflow always patches GROK2API_IMAGE below to an immutable
+# digest (ghcr.io/chenyme/grok2api@sha256:...) and GROK2API_CONFIG_REF to the
+# matching upstream commit, so every deployed Space is reproducible and can be
+# rolled back by re-deploying an older .hf-sync record.
+#
+# Build mode "source" (./Dockerfile) remains available as a fallback if
+# upstream ever stops publishing images.
+
+ARG GROK2API_IMAGE=ghcr.io/chenyme/grok2api:main
+FROM ${GROK2API_IMAGE}
+
+ARG GROK2API_IMAGE
+ARG GROK2API_CONFIG_REF=main
+
+ENV TZ=Asia/Shanghai \
+    SERVER_PORT=7860 \
+    DATA_DIR=/data \
+    GROK2API_CONFIG_SOURCE=/data/config.yaml
+
+# The upstream image ships /app/grok2api and /app/frontend/dist but NOT
+# config.example.yaml, because its own entrypoint expects the operator to mount
+# a config. start.sh seeds ${DATA_DIR}/config.yaml from that example on first
+# boot, so fetch it from the exact upstream revision this image was built from.
+# Also assert the layout we depend on, so a future upstream restructure fails
+# the build loudly instead of deploying a broken Space.
+RUN set -eux; \
+    command -v wget >/dev/null; \
+    test -x /app/grok2api; \
+    test -d /app/frontend/dist; \
+    url="https://raw.githubusercontent.com/chenyme/grok2api/${GROK2API_CONFIG_REF}/config.example.yaml"; \
+    ok=0; \
+    for attempt in 1 2 3; do \
+      if wget -qO /app/config.example.yaml "$url"; then ok=1; break; fi; \
+      echo "config.example.yaml fetch attempt ${attempt} failed" >&2; \
+      sleep 3; \
+    done; \
+    test "$ok" = 1; \
+    test -s /app/config.example.yaml
+
+LABEL org.opencontainers.image.source="https://github.com/chenyme/grok2api" \
+      io.viciy.adapter="huggingface/Dockerfile.image" \
+      io.viciy.upstream.ref="${GROK2API_CONFIG_REF}" \
+      io.viciy.upstream.image="${GROK2API_IMAGE}"
+
+COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
+
+EXPOSE 7860
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD wget -qO- "http://127.0.0.1:${SERVER_PORT}/healthz" >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/hf-start.sh"]
+CMD ["/app/grok2api", "--config", "/app/config.yaml", "--listen", "0.0.0.0:7860"]

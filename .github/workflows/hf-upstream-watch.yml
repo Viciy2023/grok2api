@@ -1,0 +1,295 @@
+name: Watch upstream and rebuild HF Space
+
+# Closes the gap that made this deployment stale: the Space previously rebuilt
+# only when someone pushed to the adapter, so upstream releases were ignored.
+#
+# Every run resolves the newest image upstream has actually published to GHCR
+# (ghcr.io/chenyme/grok2api, built by chenyme/grok2api on every push to main),
+# compares it with the deployment recorded inside the Space, and re-publishes
+# the Space when anything differs:
+#
+#   upstream image digest | upstream revision | build mode | adapter payload
+#
+# Detecting the *published image* rather than the upstream git HEAD means the
+# Space is only rebuilt once a ready, already-tested artifact exists.
+#
+# Repository settings used
+#   secret   HF_TOKEN                     Hugging Face write token
+#   secret   HF_SPACE_ID                  e.g. DanielleNguyen/Grok2Api
+#   variable HF_BUILD_MODE                image (default) | source
+#   variable HF_FAILURE_BACKOFF_SECONDS   default 21600 (6h)
+#   variable HF_KEEPALIVE                 true = ping /healthz to defeat idle sleep
+
+on:
+  schedule:
+    # GitHub may delay scheduled runs under load; 10 minutes is a practical
+    # floor that makes "upstream released -> Space rebuilt" feel immediate.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild the Space even when everything already matches"
+        type: boolean
+        default: false
+
+concurrency:
+  group: hf-upstream-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Resolve desired state
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.decide.outputs.changed }}
+      reason: ${{ steps.decide.outputs.reason }}
+      build_mode: ${{ steps.decide.outputs.build_mode }}
+      upstream_ref: ${{ steps.upstream.outputs.revision }}
+      upstream_version: ${{ steps.upstream.outputs.version }}
+      image_digest: ${{ steps.upstream.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve newest published upstream image
+        id: upstream
+        env:
+          REPO_PATH: chenyme/grok2api
+          IMAGE_TAG: main
+        run: |
+          set -euo pipefail
+          ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+
+          token=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO_PATH}:pull" | jq -r '.token // empty')
+          test -n "$token" || { echo "::error::could not obtain an anonymous GHCR pull token"; exit 1; }
+
+          headers=$(mktemp)
+          curl -fsSL -D "$headers" -o "$RUNNER_TEMP/manifest.json" \
+            -H "Authorization: Bearer ${token}" -H "Accept: ${ACCEPT}" \
+            "https://ghcr.io/v2/${REPO_PATH}/manifests/${IMAGE_TAG}"
+          digest=$(tr -d '\r' < "$headers" | awk 'tolower($1) == "docker-content-digest:" { print $2 }' | tail -n 1)
+          test -n "$digest" || { echo "::error::GHCR returned no manifest digest for ${IMAGE_TAG}"; exit 1; }
+
+          # Digest of the linux/amd64 manifest (Hugging Face builds amd64).
+          arch_digest=$(jq -r '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")][0].digest // empty' "$RUNNER_TEMP/manifest.json")
+          test -n "$arch_digest" || arch_digest="$digest"
+
+          config=$(curl -fsSL -H "Authorization: Bearer ${token}" -H "Accept: ${ACCEPT}" \
+            "https://ghcr.io/v2/${REPO_PATH}/manifests/${arch_digest}" | jq -r '.config.digest // empty')
+          test -n "$config" || { echo "::error::could not resolve the image config blob"; exit 1; }
+
+          revision=$(curl -fsSL -H "Authorization: Bearer ${token}" \
+            "https://ghcr.io/v2/${REPO_PATH}/blobs/${config}" \
+            | jq -r '.config.Labels["org.opencontainers.image.revision"] // empty')
+          test -n "$revision" || { echo "::error::the published image carries no upstream revision label"; exit 1; }
+
+          version=$(curl -fsSL "https://raw.githubusercontent.com/${REPO_PATH}/${revision}/VERSION" 2>/dev/null | tr -d '\r\n' || true)
+
+          {
+            echo "digest=${digest}"
+            echo "revision=${revision}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Newest published upstream image"
+            echo ""
+            echo "- revision: \`${revision}\`"
+            echo "- version: \`${version:-unknown}\`"
+            echo "- digest: \`${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare with the deployed Space
+        id: decide
+        env:
+          DESIRED_MODE: ${{ vars.HF_BUILD_MODE != '' && vars.HF_BUILD_MODE || 'image' }}
+          BACKOFF_SECONDS: ${{ vars.HF_FAILURE_BACKOFF_SECONDS != '' && vars.HF_FAILURE_BACKOFF_SECONDS || '21600' }}
+          FORCE: ${{ inputs.force }}
+          DESIRED_DIGEST: ${{ steps.upstream.outputs.digest }}
+          DESIRED_REF: ${{ steps.upstream.outputs.revision }}
+          SPACE_ID: ${{ secrets.HF_SPACE_ID != '' && secrets.HF_SPACE_ID || vars.HF_SPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          test -n "${SPACE_ID:-}" || { echo "::error::missing secret/variable HF_SPACE_ID"; exit 1; }
+
+          adapter_hash=$(bash .github/scripts/hf-publish.sh hash)
+
+          deployed="$RUNNER_TEMP/deployed-sync"
+          : > "$deployed"
+          curl -fsSL "https://huggingface.co/spaces/${SPACE_ID}/raw/main/.hf-sync" -o "$deployed" 2>/dev/null || true
+
+          field() { sed -n "s/^$1=//p" "$deployed" 2>/dev/null | head -n 1; }
+          have_mode=$(field build_mode)
+          have_ref=$(field upstream_ref)
+          have_digest=$(field image_digest)
+          have_hash=$(field adapter_hash)
+
+          changed=false
+          reason="already up to date"
+          if [ -z "$have_mode" ]; then
+            changed=true; reason="the Space has no deployment record yet"
+          elif [ "$have_digest" != "$DESIRED_DIGEST" ]; then
+            changed=true; reason="upstream image digest changed (${have_digest:-<none>} -> ${DESIRED_DIGEST})"
+          elif [ "$have_ref" != "$DESIRED_REF" ]; then
+            changed=true; reason="upstream revision changed (${have_ref:-<none>} -> ${DESIRED_REF})"
+          elif [ "$have_mode" != "$DESIRED_MODE" ]; then
+            changed=true; reason="build mode changed (${have_mode} -> ${DESIRED_MODE})"
+          elif [ "$have_hash" != "$adapter_hash" ]; then
+            changed=true; reason="adapter payload changed since the last deployment"
+          elif [ "$FORCE" = "true" ]; then
+            changed=true; reason="forced by workflow_dispatch"
+          fi
+
+          # A deploy that failed (for example an upstream image that cannot
+          # start) must not be retried every 10 minutes forever.
+          target="${DESIRED_MODE}:${DESIRED_REF}:${DESIRED_DIGEST}:${adapter_hash}"
+          if [ "$changed" = "true" ] && [ -f .github/hf-watch-state.json ]; then
+            fail_at=$(jq -r '.last_failure_at // empty' .github/hf-watch-state.json)
+            fail_target=$(jq -r '.last_failure_target // empty' .github/hf-watch-state.json)
+            if [ "$fail_target" = "$target" ] && [ -n "$fail_at" ]; then
+              fail_epoch=$(date -u -d "$fail_at" +%s 2>/dev/null || echo 0)
+              age=$(( $(date -u +%s) - fail_epoch ))
+              if [ "$age" -lt "$BACKOFF_SECONDS" ]; then
+                changed=false
+                reason="backing off for $(( (BACKOFF_SECONDS - age) / 60 )) more minute(s) after a failed attempt at the same target"
+              fi
+            fi
+          fi
+
+          {
+            echo "changed=${changed}"
+            echo "reason=${reason}"
+            echo "build_mode=${DESIRED_MODE}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Space drift check"
+            echo ""
+            echo "| field | deployed | desired |"
+            echo "| --- | --- | --- |"
+            echo "| build mode | \`${have_mode:-<none>}\` | \`${DESIRED_MODE}\` |"
+            echo "| upstream ref | \`${have_ref:-<none>}\` | \`${DESIRED_REF}\` |"
+            echo "| image digest | \`${have_digest:-<none>}\` | \`${DESIRED_DIGEST}\` |"
+            echo "| adapter hash | \`${have_hash:-<none>}\` | \`${adapter_hash}\` |"
+            echo ""
+            echo "**Rebuild needed:** ${changed} — ${reason:-already up to date}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "changed=${changed} (${reason:-already up to date})"
+
+      - name: Optional keep-alive ping
+        if: vars.HF_KEEPALIVE == 'true'
+        env:
+          SPACE_ID: ${{ secrets.HF_SPACE_ID != '' && secrets.HF_SPACE_ID || vars.HF_SPACE_ID }}
+        run: |
+          set -uo pipefail
+          subdomain=$(curl -fsS "https://huggingface.co/api/spaces/${SPACE_ID}" | jq -r '.subdomain // empty')
+          if [ -n "$subdomain" ]; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${subdomain}.hf.space/healthz" || true)
+            echo "keep-alive ping -> HTTP ${code}"
+          fi
+
+  deploy:
+    name: Rebuild Space
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    uses: ./.github/workflows/deploy-hf.yml
+    with:
+      build_mode: ${{ needs.check.outputs.build_mode }}
+      upstream_ref: ${{ needs.check.outputs.upstream_ref }}
+      upstream_version: ${{ needs.check.outputs.upstream_version }}
+      image_digest: ${{ needs.check.outputs.image_digest }}
+      force: true
+    secrets: inherit
+
+  record:
+    name: Record outcome
+    needs: [check, deploy]
+    if: always() && needs.check.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update the watch state file
+        env:
+          CHANGED: ${{ needs.check.outputs.changed }}
+          REASON: ${{ needs.check.outputs.reason }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          UPSTREAM_REF: ${{ needs.check.outputs.upstream_ref }}
+          UPSTREAM_VERSION: ${{ needs.check.outputs.upstream_version }}
+          IMAGE_DIGEST: ${{ needs.check.outputs.image_digest }}
+          BUILD_MODE: ${{ needs.check.outputs.build_mode }}
+        run: |
+          set -euo pipefail
+          state=.github/hf-watch-state.json
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          [ -f "$state" ] || echo '{}' > "$state"
+          current=$(cat "$state")
+
+          heartbeat=$(printf '%s' "$current" | jq -r '.heartbeat_at // empty')
+          heartbeat_epoch=0
+          if [ -n "$heartbeat" ]; then
+            heartbeat_epoch=$(date -u -d "$heartbeat" +%s 2>/dev/null || echo 0)
+          fi
+
+          # GitHub disables scheduled workflows after 60 days without commits.
+          # Refresh the heartbeat at most monthly so the watchdog survives quiet
+          # periods upstream and resumes watching automatically.
+          heartbeat_due=false
+          if [ $(( $(date -u +%s) - heartbeat_epoch )) -ge 2592000 ]; then
+            heartbeat_due=true
+          fi
+
+          target="${BUILD_MODE}:${UPSTREAM_REF}:${IMAGE_DIGEST}"
+
+          if [ "$CHANGED" = "true" ] && [ "$DEPLOY_RESULT" = "success" ]; then
+            updated=$(printf '%s' "$current" | jq \
+              --arg now "$now" --arg ref "$UPSTREAM_REF" --arg ver "$UPSTREAM_VERSION" \
+              --arg digest "$IMAGE_DIGEST" --arg mode "$BUILD_MODE" \
+              '.last_checked_at=$now | .last_result="deployed" | .last_deploy_at=$now
+               | .deployed_upstream_ref=$ref | .deployed_upstream_version=$ver
+               | .deployed_image_digest=$digest | .deployed_build_mode=$mode
+               | .consecutive_failures=0 | del(.last_failure_target)')
+          elif [ "$CHANGED" = "true" ]; then
+            updated=$(printf '%s' "$current" | jq \
+              --arg now "$now" --arg target "$target" --arg reason "$REASON" \
+              '.last_checked_at=$now | .last_result="failed" | .last_failure_at=$now
+               | .last_failure_target=$target | .last_failure_reason=$reason
+               | .consecutive_failures=((.consecutive_failures // 0) + 1)')
+          else
+            updated=$(printf '%s' "$current" | jq \
+              --arg now "$now" --arg reason "$REASON" \
+              '.last_checked_at=$now | .last_result="in-sync" | .last_reason=$reason')
+          fi
+
+          if [ "$heartbeat_due" = "true" ]; then
+            updated=$(printf '%s' "$updated" | jq --arg now "$now" '.heartbeat_at=$now')
+          elif [ -z "$heartbeat" ]; then
+            updated=$(printf '%s' "$updated" | jq --arg now "$now" '.heartbeat_at=$now')
+          fi
+
+          printf '%s\n' "$updated" | jq '.' > "$state"
+
+          # The watchdog runs every 10 minutes; recording last_checked_at each
+          # time would add ~144 commits a day. Only persist a genuinely new
+          # outcome (deploy, failure, mode change) or a due heartbeat.
+          prev_core=$(printf '%s' "$current" | jq -S 'del(.last_checked_at)')
+          new_core=$(printf '%s' "$updated" | jq -S 'del(.last_checked_at)')
+          if [ "$prev_core" = "$new_core" ] && [ "$heartbeat_due" != "true" ]; then
+            echo "no meaningful state change; nothing to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$state"
+          git commit -q -m "chore(hf): watch state $(printf '%s' "$updated" | jq -r '.last_result')"
+          git push origin HEAD:main
