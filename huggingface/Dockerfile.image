@@ -25,6 +25,7 @@ FROM ${GROK2API_IMAGE}
 
 ARG GROK2API_IMAGE
 ARG GROK2API_CONFIG_REF=main
+ARG GROK2API_VERSION=unknown
 
 ENV TZ=Asia/Shanghai \
     SERVER_PORT=7860 \
@@ -55,6 +56,17 @@ LABEL org.opencontainers.image.source="https://github.com/chenyme/grok2api" \
       io.viciy.adapter="huggingface/Dockerfile.image" \
       io.viciy.upstream.ref="${GROK2API_CONFIG_REF}" \
       io.viciy.upstream.image="${GROK2API_IMAGE}"
+
+# Deployment marker served by the app itself (upstream's frontend handler serves
+# any existing file under frontend/dist). The deploy workflow polls this to
+# prove which upstream revision the *running container* actually is, instead of
+# trusting Hugging Face's build-stage API, which can report RUNNING on the old
+# container for a short window after a push.
+RUN set -eux; \
+    printf 'revision=%s\nversion=%s\nimage=%s\nbuild_mode=image\n' \
+      "${GROK2API_CONFIG_REF}" "${GROK2API_VERSION}" "${GROK2API_IMAGE}" \
+      > /app/frontend/dist/__deployed-revision.txt; \
+    cat /app/frontend/dist/__deployed-revision.txt
 
 COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
 

@@ -183,6 +183,11 @@ render_payload() {
       || die "could not pin GROK2API_REF in Dockerfile"
   fi
 
+  # Baked into the deployment marker the image serves (see verify_space).
+  sed -i "s|^ARG GROK2API_VERSION=.*|ARG GROK2API_VERSION=${HF_UPSTREAM_VERSION:-unknown}|" "$out/Dockerfile"
+  grep -qF "ARG GROK2API_VERSION=${HF_UPSTREAM_VERSION:-unknown}" "$out/Dockerfile" \
+    || die "could not pin GROK2API_VERSION in the Dockerfile"
+
   write_sync_record "$out" "$HF_BUILD_MODE" "$HF_UPSTREAM_REF" "$ref_image" "$adapter_hash"
   log "rendered payload: mode=${HF_BUILD_MODE} ref=${HF_UPSTREAM_REF} image=${ref_image}"
   log "adapter fingerprint: ${adapter_hash}"
@@ -231,9 +236,22 @@ publish_payload() {
   printf '%s' "$sha"
 }
 
+# Verification is deliberately two-layered.
+#
+# The Hugging Face build-stage API alone is not trustworthy: immediately after a
+# push it can report RUNNING against the *previous* container, which would let a
+# deployment claim success before anything was rebuilt. So the authoritative
+# signal is the marker file the image serves at /__deployed-revision.txt: it is
+# produced by the new image and can only be observed once the new container is
+# actually live. The stage API is still polled, to fail fast and loudly on a
+# real BUILD_ERROR instead of waiting out the whole timeout.
 verify_space() {
-  local expected="$1" deadline=$((SECONDS + HF_VERIFY_TIMEOUT)) info stage sha
-  log "waiting for the Space to run ${expected:0:12} (timeout ${HF_VERIFY_TIMEOUT}s)"
+  local expected_sha="$1"
+  local expected_revision="${HF_UPSTREAM_REF}"
+  local deadline=$((SECONDS + HF_VERIFY_TIMEOUT))
+  local info stage sha base marker running_rev
+
+  log "waiting for the Space to serve upstream ${expected_revision:0:12} (timeout ${HF_VERIFY_TIMEOUT}s)"
 
   while :; do
     info="$(space_api "https://huggingface.co/api/spaces/${HF_SPACE_ID}" 2>/dev/null || true)"
@@ -242,6 +260,11 @@ verify_space() {
     else
       stage="$(printf '%s' "$info" | jq -r '.runtime.stage // "UNKNOWN"')"
       sha="$(printf '%s' "$info" | jq -r '.sha // ""')"
+      base="$(printf '%s' "$info" | jq -r '.host // empty')"
+      if [ -z "$base" ]; then
+        base="https://$(printf '%s' "$info" | jq -r '.subdomain').hf.space"
+      fi
+
       case "$stage" in
         BUILD_ERROR|RUNTIME_ERROR|CONFIG_ERROR|NO_APP_FILE|BUILD_FAILED)
           printf '%s\n' "$info" > "$HF_STATE_DIR/space-error.json"
@@ -249,45 +272,35 @@ verify_space() {
           log "Space error detail: $(printf '%s' "$info" | jq -c '.runtime // {}' 2>/dev/null | head -c 600)"
           return 2
           ;;
-        RUNNING)
-          if [ "$sha" = "$expected" ]; then
-            log "Space is RUNNING ${sha:0:12}"
-            break
-          fi
-          log "still running the previous revision ${sha:0:12}, waiting"
-          ;;
-        *)
-          log "stage=${stage} sha=${sha:0:12}"
-          ;;
       esac
+
+      if [ "$HF_VERIFY" != "1" ]; then
+        if [ "$stage" = "RUNNING" ] && [ "$sha" = "$expected_sha" ]; then
+          log "Space is RUNNING ${sha:0:12} (content verification disabled)"
+          return 0
+        fi
+        log "stage=${stage} sha=${sha:0:12}"
+      else
+        marker="$(curl -fsS --max-time 15 "${base}/__deployed-revision.txt" 2>/dev/null || true)"
+        running_rev="$(printf '%s' "$marker" | sed -n 's/^revision=//p' | head -n 1)"
+        if [ "$running_rev" = "$expected_revision" ]; then
+          if curl -fsS --max-time 15 "${base}/healthz" 2>/dev/null | grep -q '"ok"'; then
+            log "running container reports upstream ${running_rev} and /healthz is OK: ${base}"
+            return 0
+          fi
+          log "marker matches ${running_rev} but /healthz is not ready yet"
+        else
+          log "stage=${stage} sha=${sha:0:12} running_upstream=${running_rev:-<no marker yet>}"
+        fi
+      fi
     fi
+
     if [ "$SECONDS" -ge "$deadline" ]; then
-      warn "timed out waiting for ${expected:0:12}"
+      warn "timed out after ${HF_VERIFY_TIMEOUT}s waiting for upstream ${expected_revision:0:12} in ${HF_SPACE_ID}"
       return 3
     fi
     sleep 15
   done
-
-  if [ "$HF_VERIFY" != "1" ]; then
-    log "health verification disabled"
-    return 0
-  fi
-
-  local host attempt
-  host="$(printf '%s' "$info" | jq -r '.host // empty')"
-  if [ -z "$host" ]; then
-    host="https://$(printf '%s' "$info" | jq -r '.subdomain').hf.space"
-  fi
-  for attempt in $(seq 1 24); do
-    if curl -fsS --max-time 15 "${host}/healthz" 2>/dev/null | grep -q '"ok"'; then
-      log "health check passed: ${host}/healthz"
-      return 0
-    fi
-    log "health check attempt ${attempt} failed, retrying"
-    sleep 10
-  done
-  warn "Space is RUNNING but ${host}/healthz never returned {\"ok\":true}"
-  return 3
 }
 
 # --------------------------------------------------------------------------- #

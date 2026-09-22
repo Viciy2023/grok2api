@@ -59,6 +59,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
 FROM alpine:${ALPINE_VERSION}
 
 ARG GROK2API_REF
+ARG GROK2API_VERSION=unknown
 
 ENV TZ=Asia/Shanghai \
     SERVER_PORT=7860 \
@@ -78,6 +79,13 @@ COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
 COPY --from=src /src/VERSION /app/VERSION
 COPY --from=src /src/config.example.yaml /app/config.example.yaml
 COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
+
+# Deployment marker served by the app itself; see Dockerfile.image for why.
+RUN set -eux; \
+    printf 'revision=%s\nversion=%s\nbuild_mode=source\n' \
+      "${GROK2API_REF}" "${GROK2API_VERSION}" \
+      > /app/frontend/dist/__deployed-revision.txt; \
+    cat /app/frontend/dist/__deployed-revision.txt
 
 LABEL org.opencontainers.image.source="https://github.com/chenyme/grok2api" \
       io.viciy.adapter="huggingface/Dockerfile" \

@@ -50,7 +50,8 @@ Viciy2023/grok2api -> "Watch upstream and rebuild HF Space" (every 10 min)
    pin image digest + config ref, push to this Space
         |
         v
-Hugging Face rebuilds -> the workflow waits for RUNNING and /healthz = {"ok":true}
+Hugging Face rebuilds -> the workflow polls the *running container's* own
+   /__deployed-revision.txt marker plus /healthz before declaring success
         |
         v  on build/runtime failure
 automatic rollback to the previous recorded deployment
@@ -99,6 +100,9 @@ placeholder secrets are still present.
 ```bash
 # is the Space current?
 curl -s https://huggingface.co/spaces/DanielleNguyen/Grok2Api/raw/main/.hf-sync
+
+# which upstream revision is the RUNNING container actually serving?
+curl -s https://daniellenguyen-grok2api.hf.space/__deployed-revision.txt
 
 # force a drift check + deploy now
 gh workflow run "Watch upstream and rebuild HF Space" -R Viciy2023/grok2api
