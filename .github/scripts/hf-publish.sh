@@ -203,42 +203,65 @@ render_payload() {
 # --------------------------------------------------------------------------- #
 
 publish_payload() {
-  local payload="$1" space_dir msg sha
-  space_dir="$(mktemp -d)"
+  local payload="$1" space_dir msg sha attempt clone_err push_err
   msg="chore(hf): deploy ${HF_BUILD_MODE} mode @ ${HF_UPSTREAM_REF} (${HF_UPSTREAM_VERSION:-unknown})"
+  clone_err="$HF_STATE_DIR/git-clone.err"
+  push_err="$HF_STATE_DIR/git-push.err"
 
-  log "cloning Space ${HF_SPACE_ID}"
-  if ! git clone --quiet "$(space_repo_url)" "$space_dir" 2>/dev/null; then
+  # Retrying always starts from a *fresh* clone. Rebasing onto a Space head that
+  # moved underneath us cannot work here: every deployment rewrites the whole
+  # repository, so the two commits touch the same lines and always conflict.
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    space_dir="$(mktemp -d)"
+    log "cloning Space ${HF_SPACE_ID} (attempt ${attempt})"
     # Never echo the tokenised URL: it would leak HF_TOKEN into the build log.
-    warn "could not clone Space '${HF_SPACE_ID}' — verify the repository id and that HF_TOKEN has write access"
-    rm -rf "$space_dir"
-    return 1
-  fi
-
-  # The Space is a pure artifact: it holds exactly the adapter payload.
-  find "$space_dir" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
-  cp -a "$payload"/. "$space_dir"/
-
-  sha="$(
-    cd "$space_dir"
-    git config user.name "github-actions[bot]"
-    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-    git add --all
-    if git diff --cached --quiet; then
-      log "Space files already identical"
-    else
-      git commit --quiet -m "$msg"
+    if ! git clone --quiet "$(space_repo_url)" "$space_dir" 2>"$clone_err"; then
+      warn "could not clone Space '${HF_SPACE_ID}' — verify the repository id, and that HF_TOKEN exists and has write access"
+      sed -n '1,5p' "$clone_err" >&2 2>/dev/null || true
+      rm -rf "$space_dir"
+      return 1
     fi
-    git push --quiet origin HEAD:main || {
-      log "push rejected, rebasing onto the Space head"
-      git pull --quiet --rebase --autostash origin main
-      git push --quiet origin HEAD:main
-    } || exit 1
-    git rev-parse HEAD
-  )" || { rm -rf "$space_dir"; return 1; }
 
-  rm -rf "$space_dir"
-  printf '%s' "$sha"
+    # The Space is a pure artifact: it holds exactly the adapter payload.
+    find "$space_dir" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+    cp -a "$payload"/. "$space_dir"/
+
+    if sha="$(
+      cd "$space_dir" || exit 1
+      git config user.name "github-actions[bot]"
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      git add --all
+      if git diff --cached --quiet; then
+        log "Space files already identical"
+      else
+        git commit --quiet -m "$msg"
+      fi
+      git push origin HEAD:main
+      git rev-parse HEAD
+    )" 2>"$push_err"; then
+      rm -rf "$space_dir"
+      printf '%s' "$sha"
+      return 0
+    fi
+
+    rm -rf "$space_dir"
+    sed -n '1,12p' "$push_err" >&2 2>/dev/null || true
+
+    # Distinguish "the credential is wrong" from "the ref moved", because only
+    # the second one is worth retrying and only the first one needs a human.
+    if grep -qiE 'authentication|invalid username or password|401|403|permission|access denied' "$push_err" 2>/dev/null; then
+      warn "Hugging Face refused the push: the HF_TOKEN secret is missing, read-only or revoked. Issue a write token for ${HF_SPACE_ID} and update the repository secret."
+      return 1
+    fi
+
+    warn "push failed (attempt ${attempt}); retrying from a fresh clone"
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+
+  warn "gave up pushing to the Space after 3 attempts"
+  return 1
 }
 
 # Verification is deliberately two-layered.
