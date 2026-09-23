@@ -26,6 +26,7 @@ FROM ${GROK2API_IMAGE}
 ARG GROK2API_IMAGE
 ARG GROK2API_CONFIG_REF=main
 ARG GROK2API_VERSION=unknown
+ARG GROK2API_ADAPTER_HASH=unknown
 
 ENV TZ=Asia/Shanghai \
     SERVER_PORT=7860 \
@@ -62,9 +63,13 @@ LABEL org.opencontainers.image.source="https://github.com/chenyme/grok2api" \
 # prove which upstream revision the *running container* actually is, instead of
 # trusting Hugging Face's build-stage API, which can report RUNNING on the old
 # container for a short window after a push.
+#
+# "adapter" is the fingerprint of every adapter file, so a change that only
+# touches the adapter (and leaves the upstream revision alone) still changes the
+# marker and therefore still forces verification to wait for the rebuild.
 RUN set -eux; \
-    printf 'revision=%s\nversion=%s\nimage=%s\nbuild_mode=image\n' \
-      "${GROK2API_CONFIG_REF}" "${GROK2API_VERSION}" "${GROK2API_IMAGE}" \
+    printf 'revision=%s\nversion=%s\nimage=%s\nbuild_mode=image\nadapter=%s\n' \
+      "${GROK2API_CONFIG_REF}" "${GROK2API_VERSION}" "${GROK2API_IMAGE}" "${GROK2API_ADAPTER_HASH}" \
       > /app/frontend/dist/__deployed-revision.txt; \
     cat /app/frontend/dist/__deployed-revision.txt
 

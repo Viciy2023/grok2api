@@ -60,6 +60,7 @@ FROM alpine:${ALPINE_VERSION}
 
 ARG GROK2API_REF
 ARG GROK2API_VERSION=unknown
+ARG GROK2API_ADAPTER_HASH=unknown
 
 ENV TZ=Asia/Shanghai \
     SERVER_PORT=7860 \
@@ -82,8 +83,8 @@ COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
 
 # Deployment marker served by the app itself; see Dockerfile.image for why.
 RUN set -eux; \
-    printf 'revision=%s\nversion=%s\nbuild_mode=source\n' \
-      "${GROK2API_REF}" "${GROK2API_VERSION}" \
+    printf 'revision=%s\nversion=%s\nbuild_mode=source\nadapter=%s\n' \
+      "${GROK2API_REF}" "${GROK2API_VERSION}" "${GROK2API_ADAPTER_HASH}" \
       > /app/frontend/dist/__deployed-revision.txt; \
     cat /app/frontend/dist/__deployed-revision.txt
 

@@ -187,6 +187,9 @@ render_payload() {
   sed -i "s|^ARG GROK2API_VERSION=.*|ARG GROK2API_VERSION=${HF_UPSTREAM_VERSION:-unknown}|" "$out/Dockerfile"
   grep -qF "ARG GROK2API_VERSION=${HF_UPSTREAM_VERSION:-unknown}" "$out/Dockerfile" \
     || die "could not pin GROK2API_VERSION in the Dockerfile"
+  sed -i "s|^ARG GROK2API_ADAPTER_HASH=.*|ARG GROK2API_ADAPTER_HASH=${adapter_hash}|" "$out/Dockerfile"
+  grep -qF "ARG GROK2API_ADAPTER_HASH=${adapter_hash}" "$out/Dockerfile" \
+    || die "could not pin GROK2API_ADAPTER_HASH in the Dockerfile"
 
   write_sync_record "$out" "$HF_BUILD_MODE" "$HF_UPSTREAM_REF" "$ref_image" "$adapter_hash"
   log "rendered payload: mode=${HF_BUILD_MODE} ref=${HF_UPSTREAM_REF} image=${ref_image}"
@@ -243,15 +246,20 @@ publish_payload() {
 # deployment claim success before anything was rebuilt. So the authoritative
 # signal is the marker file the image serves at /__deployed-revision.txt: it is
 # produced by the new image and can only be observed once the new container is
-# actually live. The stage API is still polled, to fail fast and loudly on a
-# real BUILD_ERROR instead of waiting out the whole timeout.
+# actually live. The marker carries both the upstream revision and the adapter
+# fingerprint, so an adapter-only change (where the upstream revision is already
+# correct) still cannot pass before its own rebuild. The stage API is still
+# polled, to fail fast and loudly on a real BUILD_ERROR instead of waiting out
+# the whole timeout.
 verify_space() {
   local expected_sha="$1"
   local expected_revision="${HF_UPSTREAM_REF}"
+  local expected_adapter
+  expected_adapter="$(compute_adapter_hash "$HF_ADAPTER_DIR")"
   local deadline=$((SECONDS + HF_VERIFY_TIMEOUT))
-  local info stage sha base marker running_rev
+  local info stage sha base marker running_rev running_adapter
 
-  log "waiting for the Space to serve upstream ${expected_revision:0:12} (timeout ${HF_VERIFY_TIMEOUT}s)"
+  log "waiting for the Space to serve upstream ${expected_revision:0:12} / adapter ${expected_adapter:0:12} (timeout ${HF_VERIFY_TIMEOUT}s)"
 
   while :; do
     info="$(space_api "https://huggingface.co/api/spaces/${HF_SPACE_ID}" 2>/dev/null || true)"
@@ -283,14 +291,15 @@ verify_space() {
       else
         marker="$(curl -fsS --max-time 15 "${base}/__deployed-revision.txt" 2>/dev/null || true)"
         running_rev="$(printf '%s' "$marker" | sed -n 's/^revision=//p' | head -n 1)"
-        if [ "$running_rev" = "$expected_revision" ]; then
+        running_adapter="$(printf '%s' "$marker" | sed -n 's/^adapter=//p' | head -n 1)"
+        if [ "$running_rev" = "$expected_revision" ] && [ "$running_adapter" = "$expected_adapter" ]; then
           if curl -fsS --max-time 15 "${base}/healthz" 2>/dev/null | grep -q '"ok"'; then
-            log "running container reports upstream ${running_rev} and /healthz is OK: ${base}"
+            log "running container reports upstream ${running_rev} (adapter ${running_adapter:0:12}) and /healthz is OK: ${base}"
             return 0
           fi
           log "marker matches ${running_rev} but /healthz is not ready yet"
         else
-          log "stage=${stage} sha=${sha:0:12} running_upstream=${running_rev:-<no marker yet>}"
+          log "stage=${stage} sha=${sha:0:12} running_upstream=${running_rev:-<no marker yet>} running_adapter=${running_adapter:-<none>}"
         fi
       fi
     fi
