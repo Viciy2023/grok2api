@@ -118,6 +118,40 @@ jobs:
           echo "image digest   : ${HF_IMAGE_DIGEST:-<tag ${HF_IMAGE_TAG}>}"
           echo "adapter commit : ${HF_SOURCE_SHA}"
 
+      - name: Snapshot the live database before restarting the Space
+        # The Space's /data lives on a bucket volume. Restarting the container
+        # during a SQLite write is what produced a "database disk image is
+        # malformed" incident, so keep an off-bucket copy of the data taken
+        # while the current container is still healthy. Best effort: a failure
+        # here must never block a deployment.
+        continue-on-error: true
+        env:
+          HF_DATA_BUCKET: ${{ vars.HF_DATA_BUCKET }}
+        run: |
+          set -uo pipefail
+          bucket="${HF_DATA_BUCKET:-${HF_SPACE_ID}-storage}"
+          dir="$RUNNER_TEMP/db-snapshot"
+          mkdir -p "$dir"
+          for f in backend.db backend.db-wal; do
+            if curl -fsSL --max-time 120 -H "Authorization: Bearer ${HF_TOKEN}" \
+                 "https://huggingface.co/buckets/${bucket}/resolve/${f}" -o "$dir/$f" 2>/dev/null; then
+              echo "saved ${f} ($(stat -c%s "$dir/$f") bytes) from ${bucket}"
+            else
+              echo "could not read ${f} from bucket ${bucket}"
+            fi
+          done
+          test -s "$dir/backend.db" || echo "no database snapshot available"
+
+      - name: Upload the database snapshot
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-deploy-db-${{ github.run_id }}
+          path: ${{ runner.temp }}/db-snapshot
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Publish and verify Space
         id: publish
         run: bash .github/scripts/hf-publish.sh deploy

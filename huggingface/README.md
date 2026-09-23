@@ -71,8 +71,33 @@ Mount HF Storage (e.g. `DanielleNguyen/Grok2Api-storage`) to **`/data`**.
 | --- | --- |
 | `/data/config.yaml` | Runtime config (seeded once from upstream `config.example.yaml`) |
 | `/data/backend.db` | SQLite database |
+| `/data/backend.db-wal` | SQLite write-ahead log (the app opens the DB with `journal_mode(WAL)`) |
+| `/data/backups/` | Rotating pre-boot database snapshots (see below) |
 | `/data/media` | Local media files |
 | `/data/.env` | Optional env file loaded at start |
+
+## Storage durability
+
+`/data` is a bucket volume. That is safe for whole files, but a container stopped
+in the middle of a SQLite write — which is exactly what a rebuild does — can
+leave a torn page behind. The symptom is subtle: the service starts, `/healthz`
+answers, but the admin UI reports **获取账号列表失败** because every query on the
+damaged table returns `database disk image is malformed`.
+
+To make that self-healing, `sqlite-preflight.sh` runs on every boot, before the
+application starts, and:
+
+1. writes a consistent rotating snapshot via `sqlite3 .backup` (which folds the
+   WAL in) to `/data/backups/backend.db.1` … `.4`;
+2. verifies the database with `PRAGMA integrity_check`;
+3. if verification fails, rebuilds it with `sqlite3 .recover`, accepting the
+   result **only** when it verifies *and* does not report fewer accounts than the
+   damaged file; otherwise it restores the newest snapshot that verifies.
+
+The original file is never deleted: a replaced database is kept next to it as
+`backend.db.corrupt-<timestamp>`, and a failed repair leaves everything as it
+was. Deployments additionally upload an off-bucket copy of the database taken
+*before* the restart as a GitHub Actions artifact (`pre-deploy-db-<run_id>`).
 
 ## First boot secrets
 
@@ -124,6 +149,7 @@ Repository configuration required by the workflows:
 | `HF_BUILD_MODE` | variable (optional) | `image` (default) or `source` |
 | `HF_FAILURE_BACKOFF_SECONDS` | variable (optional) | default `21600` |
 | `HF_HEARTBEAT_SECONDS` | variable (optional) | default `72000` (20h) |
+| `HF_DATA_BUCKET` | variable (optional) | bucket to snapshot before a deploy, default `<HF_SPACE_ID>-storage` |
 | `HF_KEEPALIVE` | variable (optional) | `true` pings `/healthz` to defeat idle sleep |
 
 > `HF_TOKEN` must have **write** access to this Space. A read-only or expired

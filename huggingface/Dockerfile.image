@@ -53,6 +53,18 @@ RUN set -eux; \
     test "$ok" = 1; \
     test -s /app/config.example.yaml
 
+# sqlite3 CLI powers the boot-time database guard (sqlite-preflight.sh), which
+# verifies /data/backend.db and repairs it if a rebuild left it malformed.
+RUN set -eux; \
+    ok=0; \
+    for attempt in 1 2 3; do \
+      if apk add --no-cache sqlite; then ok=1; break; fi; \
+      echo "apk add sqlite attempt ${attempt} failed" >&2; \
+      sleep 5; \
+    done; \
+    test "$ok" = 1; \
+    sqlite3 --version
+
 LABEL org.opencontainers.image.source="https://github.com/chenyme/grok2api" \
       io.viciy.adapter="huggingface/Dockerfile.image" \
       io.viciy.upstream.ref="${GROK2API_CONFIG_REF}" \
@@ -74,6 +86,7 @@ RUN set -eux; \
     cat /app/frontend/dist/__deployed-revision.txt
 
 COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
+COPY --chmod=0644 sqlite-preflight.sh /usr/local/bin/sqlite-preflight.sh
 
 EXPOSE 7860
 

@@ -67,7 +67,7 @@ ENV TZ=Asia/Shanghai \
     DATA_DIR=/data \
     GROK2API_CONFIG_SOURCE=/data/config.yaml
 
-RUN apk add --no-cache ca-certificates su-exec tzdata wget \
+RUN apk add --no-cache ca-certificates su-exec tzdata wget sqlite \
     && addgroup -S -g 10001 grok2api \
     && adduser -S -D -H -u 10001 -G grok2api grok2api \
     && mkdir -p /app/data /app/frontend/dist /data /data/media /run/grok2api \
@@ -80,6 +80,7 @@ COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
 COPY --from=src /src/VERSION /app/VERSION
 COPY --from=src /src/config.example.yaml /app/config.example.yaml
 COPY --chmod=0755 start.sh /usr/local/bin/hf-start.sh
+COPY --chmod=0644 sqlite-preflight.sh /usr/local/bin/sqlite-preflight.sh
 
 # Deployment marker served by the app itself; see Dockerfile.image for why.
 RUN set -eux; \

@@ -56,7 +56,7 @@ HF_SOURCE_SHA="${HF_SOURCE_SHA:-}"
 HF_STATE_DIR="${HF_STATE_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/hf-publish}"
 UPSTREAM_REPO_SLUG="${HF_UPSTREAM_REPOSITORY:-chenyme/grok2api}"
 
-ADAPTER_FILES=(Dockerfile Dockerfile.image start.sh README.md .env.example)
+ADAPTER_FILES=(Dockerfile Dockerfile.image start.sh sqlite-preflight.sh README.md .env.example)
 
 # All logging goes to stderr so stdout carries only machine-readable data.
 log()  { printf '[hf-publish] %s\n' "$*" >&2; }
@@ -160,10 +160,12 @@ render_payload() {
   else
     cp "$HF_ADAPTER_DIR/Dockerfile" "$out/Dockerfile"
   fi
-  cp "$HF_ADAPTER_DIR/start.sh"     "$out/start.sh"
-  cp "$HF_ADAPTER_DIR/README.md"    "$out/README.md"
-  cp "$HF_ADAPTER_DIR/.env.example" "$out/.env.example"
+  cp "$HF_ADAPTER_DIR/start.sh"              "$out/start.sh"
+  cp "$HF_ADAPTER_DIR/sqlite-preflight.sh"   "$out/sqlite-preflight.sh"
+  cp "$HF_ADAPTER_DIR/README.md"             "$out/README.md"
+  cp "$HF_ADAPTER_DIR/.env.example"          "$out/.env.example"
   chmod 0755 "$out/start.sh"
+  chmod 0644 "$out/sqlite-preflight.sh"
 
   # Pin the upstream revision so the build is reproducible. The sed patterns
   # must match, otherwise the Space would silently build `main` (drifting again

@@ -11,6 +11,15 @@ LISTEN_ADDR="0.0.0.0:${SERVER_PORT:-7860}"
 
 mkdir -p "$DATA_DIR" "$DATA_DIR/media" /run/grok2api
 
+# SQLite self-healing guard for the bucket-backed /data volume. It snapshots the
+# database, verifies it and rebuilds it when a torn write left it malformed.
+HAVE_SQLITE_PREFLIGHT=0
+if [ -f /usr/local/bin/sqlite-preflight.sh ]; then
+  # shellcheck disable=SC1091
+  . /usr/local/bin/sqlite-preflight.sh
+  HAVE_SQLITE_PREFLIGHT=1
+fi
+
 # Load optional env file first so secrets are available for seed/override.
 if [ -f "$DATA_DIR/.env" ]; then
   set -a
@@ -88,6 +97,14 @@ fi
 cp "$CONFIG_SOURCE" "$APP_CONFIG"
 chown grok2api:grok2api "$APP_CONFIG" 2>/dev/null || true
 chmod 0600 "$APP_CONFIG" || true
+
+# Repair the database before the application opens it. Runs as root, before the
+# recursive chown below so anything it creates still ends up writable by the
+# unprivileged application user.
+if [ "$HAVE_SQLITE_PREFLIGHT" = "1" ]; then
+  sqlite_preflight "$DATA_DIR" || echo "WARN: database preflight failed" >&2
+fi
+
 chown -R grok2api:grok2api "$DATA_DIR" 2>/dev/null || true
 
 if ! printf '%s' "$*" | grep -q -- '--listen'; then
