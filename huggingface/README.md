@@ -123,7 +123,18 @@ Repository configuration required by the workflows:
 | `HF_SPACE_ID` | secret or variable | `DanielleNguyen/Grok2Api` |
 | `HF_BUILD_MODE` | variable (optional) | `image` (default) or `source` |
 | `HF_FAILURE_BACKOFF_SECONDS` | variable (optional) | default `21600` |
+| `HF_HEARTBEAT_SECONDS` | variable (optional) | default `72000` (20h) |
 | `HF_KEEPALIVE` | variable (optional) | `true` pings `/healthz` to defeat idle sleep |
+
+> `HF_TOKEN` must have **write** access to this Space. A read-only or expired
+> token makes every deployment fail at the publish step.
+
+> **Run frequency.** GitHub treats `schedule` as best-effort and throttles it for
+> repositories with no recent activity — on this repo the `*/10` cron was
+> measured firing roughly every 3 hours. Detection is drift-based, so a late
+> check still converges on the right revision; use the manual trigger above (or
+> an external cron trigger, which needs a PAT) when an update must land within
+> minutes.
 
 > `HF_TOKEN` must have **write** access to this Space. A read-only or expired
 > token makes every deployment fail at the publish step.

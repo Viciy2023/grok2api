@@ -18,12 +18,18 @@ name: Watch upstream and rebuild HF Space
 #   secret   HF_SPACE_ID                  e.g. DanielleNguyen/Grok2Api
 #   variable HF_BUILD_MODE                image (default) | source
 #   variable HF_FAILURE_BACKOFF_SECONDS   default 21600 (6h)
+#   variable HF_HEARTBEAT_SECONDS         default 72000 (20h); see the record job
 #   variable HF_KEEPALIVE                 true = ping /healthz to defeat idle sleep
+#
+# MEASURED CAVEAT: GitHub treats `schedule` as best-effort and throttles it for
+# repositories without recent activity. On this repo the */10 cron was observed
+# firing roughly every 3 hours. The pipeline is drift-driven, so a later check
+# still converges; run the workflow manually (or wire an external cron trigger,
+# which needs a PAT) when an update must land within minutes.
 
 on:
   schedule:
-    # GitHub may delay scheduled runs under load; 10 minutes is a practical
-    # floor that makes "upstream released -> Space rebuilt" feel immediate.
+    # Best-effort: GitHub may schedule this far less often (see caveat above).
     - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
@@ -226,6 +232,7 @@ jobs:
           UPSTREAM_VERSION: ${{ needs.check.outputs.upstream_version }}
           IMAGE_DIGEST: ${{ needs.check.outputs.image_digest }}
           BUILD_MODE: ${{ needs.check.outputs.build_mode }}
+          HEARTBEAT_SECONDS: ${{ vars.HF_HEARTBEAT_SECONDS != '' && vars.HF_HEARTBEAT_SECONDS || '72000' }}
         run: |
           set -euo pipefail
           state=.github/hf-watch-state.json
@@ -240,11 +247,16 @@ jobs:
             heartbeat_epoch=$(date -u -d "$heartbeat" +%s 2>/dev/null || echo 0)
           fi
 
-          # GitHub disables scheduled workflows after 60 days without commits.
-          # Refresh the heartbeat at most monthly so the watchdog survives quiet
-          # periods upstream and resumes watching automatically.
+          # Two reasons to refresh this file even when nothing changed:
+          #  1) GitHub disables scheduled workflows after 60 days without
+          #     commits, and throttles the schedule of repositories with no
+          #     recent activity (this repo was observed running the cron every
+          #     ~3h instead of every 10 minutes). Periodic bot commits keep the
+          #     repository active, which is what the schedule frequency depends
+          #     on. Set HF_HEARTBEAT_SECONDS=2592000 to go back to monthly.
+          #  2) It is the only record of when the watchdog last ran.
           heartbeat_due=false
-          if [ $(( $(date -u +%s) - heartbeat_epoch )) -ge 2592000 ]; then
+          if [ $(( $(date -u +%s) - heartbeat_epoch )) -ge "$HEARTBEAT_SECONDS" ]; then
             heartbeat_due=true
           fi
 
