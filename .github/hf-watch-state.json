@@ -1,7 +1,7 @@
 {
   "heartbeat_at": "2026-10-14T14:41:43Z",
-  "last_checked_at": "2026-10-14T18:58:12Z",
-  "last_result": "deployed",
+  "last_checked_at": "2026-10-14T22:05:33Z",
+  "last_result": "in-sync",
   "last_reason": "already up to date",
   "consecutive_failures": 0,
   "last_deploy_at": "2026-10-14T18:58:12Z",
