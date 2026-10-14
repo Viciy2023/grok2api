@@ -1,13 +1,13 @@
 {
   "heartbeat_at": "2026-10-14T14:41:43Z",
-  "last_checked_at": "2026-10-14T14:41:43Z",
-  "last_result": "in-sync",
+  "last_checked_at": "2026-10-14T18:58:12Z",
+  "last_result": "deployed",
   "last_reason": "already up to date",
   "consecutive_failures": 0,
-  "last_deploy_at": "2026-09-30T07:31:57Z",
-  "deployed_upstream_ref": "7c889a960e2638341b4dae9a5c81af0e0f38c87f",
+  "last_deploy_at": "2026-10-14T18:58:12Z",
+  "deployed_upstream_ref": "47810328db6dc939efe04f45b627ada61cd7517a",
   "deployed_upstream_version": "v3.1.6",
-  "deployed_image_digest": "sha256:1c6fc13f9fc45b561b2d3568dc4e02f5a9f1633a51565636721f42ebe60c778c",
+  "deployed_image_digest": "sha256:d24ca6a7efdbeaf5c7aa98f90973768aac444df1170f221d383ebfe6376f77be",
   "deployed_build_mode": "image",
   "last_failure_at": "2026-09-23T06:35:57Z",
   "last_failure_reason": "adapter payload changed since the last deployment"
